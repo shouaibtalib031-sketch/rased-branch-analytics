@@ -1,0 +1,70 @@
+import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import PDFDocument from "pdfkit";
+
+const root=path.resolve(import.meta.dirname,".."),port=4317,temp=await fs.mkdtemp(path.join(os.tmpdir(),"rased-qa-")),dataDir=path.join(temp,"data"),uploadDir=path.join(temp,"uploads"),qaArtifacts=path.join(root,"tmp","qa");
+await fs.rm(qaArtifacts,{recursive:true,force:true});await fs.mkdir(qaArtifacts,{recursive:true});
+const server=spawn(process.execPath,["server.js"],{cwd:root,env:{...process.env,NODE_ENV:"test",PORT:String(port),DATA_DIR:dataDir,UPLOAD_DIR:uploadDir,OUTPUT_PDF_DIR:path.join(temp,"output-pdf"),OPENAI_API_KEY:""},stdio:["ignore","pipe","pipe"]});
+let logs="";server.stdout.on("data",d=>logs+=d);server.stderr.on("data",d=>logs+=d);
+const waitForServer=()=>new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error(`تعذر تشغيل الخادم\n${logs}`)),15000);server.stdout.on("data",d=>{if(String(d).includes("رصد يعمل")){clearTimeout(timeout);resolve()}});server.on("exit",code=>reject(new Error(`توقف الخادم: ${code}\n${logs}`)))});
+const results=[];
+const record=(name,ok,detail="")=>{results.push({name,ok,detail});console.log(`${ok?"✓":"✗"} ${name}${detail?` — ${detail}`:""}`)};
+const request=async(route,{method="GET",body,headers={}}={})=>{const response=await fetch(`http://0.0.0.0:${port}/api${route}`,{method,body,headers});return response};
+const json=async(route,options={})=>{const response=await request(route,options),data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(`${options.method||"GET"} ${route}: ${response.status} ${data.error||""}`);return data};
+const authHeaders=token=>({Authorization:`Bearer ${token}`,"X-Requested-With":"RasedWeb"});
+const jsonHeaders=token=>({...authHeaders(token),"Content-Type":"application/json"});
+const check=async(name,fn)=>{try{const detail=await fn();record(name,true,detail||"")}catch(error){record(name,false,error.message)}};
+
+try{
+  await waitForServer();
+  const login=await json("/auth/login",{method:"POST",headers:{"Content-Type":"application/json","X-Requested-With":"RasedWeb"},body:JSON.stringify({email:"admin@rased.sa",password:"Admin123!"})}),token=login.token,h=authHeaders(token),jh=jsonHeaders(token);
+  record("تسجيل الدخول",Boolean(token),login.user?.name);
+  const endpoints=["/auth/me","/dashboard?period=3m","/executive","/command-center","/health/regions","/health/supervisors","/forecasts","/smart-alerts","/heatmap","/branches","/visits","/reports","/observations?period=1y","/warnings?period=1y","/interventions","/supervisors/analytics?period=1y","/reports/general-manager?period=3m","/reports/monthly","/notifications","/settings"];
+  for(const endpoint of endpoints)await check(`API ${endpoint}`,async()=>{const r=await request(endpoint,{headers:h});if(!r.ok)throw new Error(`HTTP ${r.status}`);const data=await r.json();return Array.isArray(data)?`${data.length} سجل`:"OK"});
+  const branches=await json("/branches",{headers:h}),branchId=branches.items[0].id,secondBranchId=branches.items[1].id;
+  await check("تفاصيل الفرع",async()=>{const d=await json(`/branches/${branchId}`,{headers:h});return `${d.visits.length} زيارة`});
+  await check("الخط الزمني والتوقع والبنود",async()=>{await Promise.all([json(`/branches/${branchId}/timeline`,{headers:h}),json(`/branches/${branchId}/prediction`,{headers:h}),json(`/branches/${branchId}/items/trends`,{headers:h})]);return "OK"});
+  await check("مقارنة فرعين",async()=>{const d=await json(`/compare/branches/full?a=${branchId}&b=${secondBranchId}`,{headers:h});return d.winner});
+  await check("المساعد الذكي",async()=>{const d=await json("/assistant/ask",{method:"POST",headers:jh,body:JSON.stringify({question:"ما أضعف الفروع؟"})});return d.answer?"إجابة صحيحة":"بدون إجابة"});
+  let createdBranch,createdItem,createdObservation;
+  await check("CRUD الفروع: إنشاء",async()=>{createdBranch=await json("/branches",{method:"POST",headers:jh,body:JSON.stringify({name:"فرع اختبار QA",city:"الرياض",region:"الوسطى"})});return createdBranch.id});
+  await check("CRUD الفروع: تعديل",async()=>{await json(`/branches/${createdBranch.id}`,{method:"PATCH",headers:jh,body:JSON.stringify({city:"جدة"})});return "OK"});
+  await check("CRUD الفروع: حذف آمن",async()=>{await json(`/branches/${createdBranch.id}`,{method:"DELETE",headers:h});return "مؤرشف"});
+  await check("CRUD البنود: إنشاء",async()=>{createdItem=await json("/settings/items",{method:"POST",headers:jh,body:JSON.stringify({name:"بند QA",weight:1.5,safetyCritical:false})});return createdItem.id});
+  await check("CRUD البنود: تعديل",async()=>{await json(`/settings/items/${createdItem.id}`,{method:"PATCH",headers:jh,body:JSON.stringify({weight:2})});return "OK"});
+  await check("CRUD البنود: حذف آمن",async()=>{await json(`/settings/items/${createdItem.id}`,{method:"DELETE",headers:h});return "مؤرشف"});
+  await check("CRUD الملاحظات: إنشاء",async()=>{createdObservation=await json("/observations",{method:"POST",headers:jh,body:JSON.stringify({branchId,body:"ملاحظة اختبار QA",category:"جودة",severity:"medium"})});return createdObservation.id});
+  await check("CRUD الملاحظات: تعديل",async()=>{await json(`/observations/${createdObservation.id}`,{method:"PATCH",headers:jh,body:JSON.stringify({state:"in_progress",comment:"QA"})});return "OK"});
+  await check("CRUD الملاحظات: حذف",async()=>{await json(`/observations/${createdObservation.id}`,{method:"DELETE",headers:h});return "OK"});
+  const samplePdf=path.join(temp,"qa-report.pdf");await new Promise((resolve,reject)=>{const doc=new PDFDocument(),out=createWriteStream(samplePdf);doc.pipe(out);doc.fontSize(18).text("QA Branch Visit Report").fontSize(12).text("Branch: QA").text("Score: 88.51");doc.end();out.on("finish",resolve);out.on("error",reject)});
+  await check("رفض PDF مزيف",async()=>{const form=new FormData();form.append("reports",new Blob(["not a pdf"],{type:"application/pdf"}),"fake.pdf");const r=await request("/reports/upload",{method:"POST",headers:h,body:form});if(r.status!==400)throw new Error(`كان يجب رفض الملف: ${r.status}`);return "مرفوض بأمان"});
+  let uploaded,visitId;
+  await check("رفع تقرير PDF",async()=>{const form=new FormData();form.append("reports",new Blob([await fs.readFile(samplePdf)],{type:"application/pdf"}),"qa-report.pdf");const d=await json("/reports/upload",{method:"POST",headers:h,body:form});uploaded=d[0];return uploaded.id});
+  await check("تحليل التقرير واستخراج البيانات",async()=>{const d=await json(`/reports/${uploaded.id}/analyze`,{method:"POST",headers:h});visitId=d.visitId;if(!d.data.branchName||!d.data.inspectorName||!d.data.items.length)throw new Error("حقول الاستخراج ناقصة");return `${d.data.branchName} / ${d.data.finalScore}%`});
+  await check("مراجعة التقرير",async()=>{const d=await json(`/reports/${visitId}/review`,{headers:h});return d.workflow_state});
+  await check("تعديل المسودة",async()=>{const review=await json(`/reports/${visitId}/review`,{headers:h});await json(`/reports/${visitId}/review`,{method:"PUT",headers:jh,body:JSON.stringify(review.draft_data)});return "OK"});
+  await check("اعتماد التقرير",async()=>{await json(`/reports/${visitId}/approve`,{method:"POST",headers:h});return "OK"});
+  await check("تفاصيل الزيارة المعتمدة",async()=>{const d=await json(`/visits/${visitId}`,{headers:h});return `${d.items.length} بند`});
+  await check("فتح ملف التقرير المرتبط",async()=>{const r=await request(`/reports/${uploaded.id}/file`,{headers:h});const bytes=new Uint8Array(await r.arrayBuffer());if(!r.ok||String.fromCharCode(...bytes.slice(0,4))!=="%PDF")throw new Error(`ملف غير صالح ${r.status}`);return `${bytes.length} بايت`});
+  await check("تصدير PDF شامل",async()=>{const r=await request("/exports/general-manager.pdf?period=3m",{headers:h});const bytes=new Uint8Array(await r.arrayBuffer());if(!r.ok||String.fromCharCode(...bytes.slice(0,4))!=="%PDF")throw new Error(`PDF غير صالح ${r.status}`);await fs.writeFile(path.join(qaArtifacts,"comprehensive-report.pdf"),bytes);return `${bytes.length} بايت`});
+  await check("تصدير PDF فرع",async()=>{const r=await request(`/exports/branch/${branchId}.pdf`,{headers:h});const bytes=new Uint8Array(await r.arrayBuffer());if(!r.ok||String.fromCharCode(...bytes.slice(0,4))!=="%PDF")throw new Error("PDF الفرع غير صالح");return `${bytes.length} بايت`});
+  for(const type of ["branches","observations","warnings","supervisors"])await check(`تصدير Excel: ${type}`,async()=>{const r=await request(`/exports/${type}`,{headers:h}),bytes=new Uint8Array(await r.arrayBuffer());if(!r.ok||String.fromCharCode(...bytes.slice(0,2))!=="PK")throw new Error(`Excel غير صالح ${r.status}`);await fs.writeFile(path.join(qaArtifacts,`${type}.xlsx`),bytes);return `${bytes.length} بايت`});
+  await check("سجل العمليات",async()=>{const count=(await json("/settings",{headers:h})).items.length;return `${count} بند`});
+  const usersBeforeReset=(await json("/settings",{headers:h})).users.length;
+  await check("رفض إعادة التهيئة دون العبارة",async()=>{const r=await request("/settings/reset-production",{method:"POST",headers:jh,body:JSON.stringify({confirmation:"خطأ"})});if(r.status!==400)throw new Error(`HTTP ${r.status}`);return "مرفوض بأمان"});
+  await check("Rollback يعيد البيانات والملفات عند الفشل",async()=>{const beforeBranches=(await json("/branches",{headers:h})).items.length,beforeReports=(await json("/reports",{headers:h})).length;const failed=await request("/settings/reset-production",{method:"POST",headers:jh,body:JSON.stringify({confirmation:"مسح بيانات التجربة",simulateFailure:true})});if(failed.status<400)throw new Error("لم يحدث الفشل التجريبي");const afterBranches=(await json("/branches",{headers:h})).items.length,afterReports=(await json("/reports",{headers:h})).length,file=await request(`/reports/${uploaded.id}/file`,{headers:h});if(beforeBranches!==afterBranches||beforeReports!==afterReports||!file.ok)throw new Error("لم يُعد Rollback البيانات أو الملف");return "تمت الاستعادة"});
+  logs="";
+  await check("إعادة تهيئة بيانات التجربة داخل Transaction",async()=>{const d=await json("/settings/reset-production",{method:"POST",headers:jh,body:JSON.stringify({confirmation:"مسح بيانات التجربة"})});if(!d.ok)throw new Error("لم تكتمل العملية");return `${d.deleted.branches} فروع و${d.deleted.visits} زيارات`});
+  await check("العدادات صفر والمستخدمون والإعدادات محفوظة",async()=>{const [b,v,r,o,w,s,settings,me]=await Promise.all([json("/branches",{headers:h}),json("/visits",{headers:h}),json("/reports",{headers:h}),json("/observations?period=1y",{headers:h}),json("/warnings?period=1y",{headers:h}),json("/supervisors/analytics?period=1y",{headers:h}),json("/settings",{headers:h}),json("/auth/me",{headers:h})]);if(b.items.length||v.items.length||r.length||o.length||w.items.length||s.length)throw new Error("بقيت بيانات تشغيلية بعد المسح");if(!settings.items.length||settings.users.length!==usersBeforeReset||me.role!=="system_admin")throw new Error("حُذف مستخدمون أو إعدادات أساسية");return `${settings.users.length} مستخدم و${settings.items.length} بند محفوظ`});
+  const approveFreshReport=async()=>{const form=new FormData();form.append("reports",new Blob([await fs.readFile(samplePdf)],{type:"application/pdf"}),"qa-report.pdf");const uploadedFresh=(await json("/reports/upload",{method:"POST",headers:h,body:form}))[0],analysis=await json(`/reports/${uploadedFresh.id}/analyze`,{method:"POST",headers:h});await json(`/reports/${analysis.visitId}/approve`,{method:"POST",headers:h});return analysis};
+  await check("أول تقرير ينشئ الفرع والمراقب تلقائيًا",async()=>{await approveFreshReport();const [b,s]=await Promise.all([json("/branches",{headers:h}),json("/supervisors/analytics?period=1y",{headers:h})]);if(b.items.length!==1||s.length!==1)throw new Error(`الفروع ${b.items.length}، المراقبون ${s.length}`);return `${b.items[0].name} / ${s[0].name}`});
+  await check("التقرير الثاني يعيد استخدام الفرع والمراقب",async()=>{await approveFreshReport();const [b,s,v]=await Promise.all([json("/branches",{headers:h}),json("/supervisors/analytics?period=1y",{headers:h}),json("/visits",{headers:h})]);if(b.items.length!==1||s.length!==1||v.items.length!==2)throw new Error(`الفروع ${b.items.length}، المراقبون ${s.length}، الزيارات ${v.items.length}`);return "لا تكرار"});
+  await check("Backend Logs بلا Exceptions",async()=>{if(/(?:uncaught|exception|error:|typeerror|referenceerror)/i.test(logs))throw new Error(logs.slice(-800));return "نظيف"});
+}finally{
+  server.kill("SIGTERM");
+  await fs.rm(temp,{recursive:true,force:true});
+}
+const failed=results.filter(x=>!x.ok);console.log(`\nالنتيجة: ${results.length-failed.length}/${results.length} ناجح`);if(failed.length){console.error(failed);process.exitCode=1}

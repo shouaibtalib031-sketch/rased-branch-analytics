@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: rased
+    runtime: docker
+    healthCheckPath: /api/health
+    disk:
+      name: rased-files
+      mountPath: /var/lib/rased
+      sizeGB: 10
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: TRUST_PROXY
+        value: "true"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: rased-postgres
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_NAME
+        value: مدير النظام
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SEED_DEMO_DATA
+        value: "false"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5.4-mini
+      - key: UPLOAD_DIR
+        value: /var/lib/rased/uploads
+      - key: OUTPUT_PDF_DIR
+        value: /var/lib/rased/reports
+
+databases:
+  - name: rased-postgres
+    databaseName: rased
+    user: rased

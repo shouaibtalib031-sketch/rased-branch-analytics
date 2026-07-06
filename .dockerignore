@@ -1,0 +1,12 @@
+node_modules
+.git
+.env
+.data
+dist
+storage/uploads
+output
+outputs
+tmp
+work
+.DS_Store
+npm-debug.log

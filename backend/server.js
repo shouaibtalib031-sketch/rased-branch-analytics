@@ -1,0 +1,22 @@
+import express from "express";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { config } from "./config.js";
+import { initDatabase } from "./db.js";
+import { api } from "./routes.js";
+
+await initDatabase();
+const app=express(),root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
+const publicRoot=config.production?path.join(root,"dist"):root;
+app.set("trust proxy",process.env.TRUST_PROXY==="false"?false:1);
+app.use(helmet({contentSecurityPolicy:false,crossOriginResourcePolicy:false}));
+app.use(express.json({limit:"2mb"}));
+app.use("/api/auth",rateLimit({windowMs:15*60*1000,limit:50,standardHeaders:true,legacyHeaders:false}));
+app.get("/api/health",(_req,res)=>res.json({ok:true,service:"rased",environment:config.production?"production":"development"}));
+app.use("/api",api);
+app.use(express.static(publicRoot,{index:"index.html",extensions:["html"],maxAge:config.production?"1h":0}));
+app.use((err,_req,res,_next)=>{console.error(err);res.status(err.code==="LIMIT_FILE_SIZE"?413:400).json({error:err.message||"حدث خطأ غير متوقع"})});
+app.use((req,res,next)=>req.method==="GET"?res.sendFile(path.join(publicRoot,"index.html")):next());
+app.listen(config.port,config.host,()=>console.log(`رصد يعمل على المنفذ ${config.port}`));

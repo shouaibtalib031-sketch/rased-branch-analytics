@@ -1,0 +1,36 @@
+{
+  "name": "branch-ops-ai",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "build": "node scripts/build.mjs",
+    "start": "node server.js",
+    "start:production": "NODE_ENV=production node server.js",
+    "check": "node --check app.js && node --check backend/server.js && node --check backend/routes.js && node --check backend/enterprise.js && node --check backend/analyzer.js && node --check backend/reporting.js",
+    "test": "node --test backend/*.test.js",
+    "qa": "node scripts/qa-audit.mjs"
+  },
+  "engines": {
+    "node": ">=20 <25"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.4",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
+    "file-type": "^22.0.1",
+    "helmet": "^8.2.0",
+    "jsonwebtoken": "^9.0.3",
+    "mammoth": "^1.12.0",
+    "multer": "^2.2.0",
+    "openai": "^6.45.0",
+    "pdf-parse": "^2.4.5",
+    "pdfkit": "^0.19.1",
+    "pg": "^8.22.0",
+    "zod": "^4.4.3"
+  }
+}
