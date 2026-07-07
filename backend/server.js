@@ -19,4 +19,4 @@ app.use("/api",api);
 app.use(express.static(publicRoot,{index:"index.html",extensions:["html"],maxAge:config.production?"1h":0}));
 app.use((err,_req,res,_next)=>{console.error(err);res.status(err.code==="LIMIT_FILE_SIZE"?413:400).json({error:err.message||"حدث خطأ غير متوقع"})});
 app.use((req,res,next)=>req.method==="GET"?res.sendFile(path.join(publicRoot,"index.html")):next());
-app.listen(config.port,config.host,()=>console.log(`رصد يعمل على المنفذ ${config.port}`));
+app.listen(config.port,config.bindHost,()=>console.log(`رصد يعمل على المنفذ ${config.port}`));
