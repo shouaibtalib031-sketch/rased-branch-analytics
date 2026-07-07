@@ -59,7 +59,9 @@ NODE_ENV=production
 HOST=0.0.0.0
 PORT=8080
 TRUST_PROXY=true
-DATABASE_URL=postgresql://user:password@host:5432/rased
+# Railway: اربط هذا المتغير بخدمة PostgreSQL من داخل Railway Variables
+# عبر Add Reference، ولا تكتب بيانات دخول ثابتة يدويًا.
+DATABASE_URL=
 JWT_SECRET=a-long-random-production-secret
 ADMIN_NAME=مدير النظام
 ADMIN_EMAIL=admin@your-domain.com
@@ -73,6 +75,7 @@ OUTPUT_PDF_DIR=/var/lib/rased/reports
 في الإنتاج:
 
 - يلزم PostgreSQL خارجي عبر `DATABASE_URL`؛ لا يُستخدم PGlite.
+- في Railway يجب أن تكون `DATABASE_URL` في خدمة الويب Reference لقيمة `DATABASE_URL` الموجودة في خدمة PostgreSQL، مثل `${{Postgres.DATABASE_URL}}` إذا كان اسم خدمة قاعدة البيانات `Postgres`.
 - لا تُزرع فروع أو زيارات تجريبية عند `SEED_DEMO_DATA=false`.
 - يُنشأ مدير النظام الأول من متغيرات `ADMIN_*`.
 - يجب توفير قرص دائم أو Object Storage لمسارات الملفات.
