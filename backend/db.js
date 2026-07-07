@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { statusOf } from "./rules.js";
 
 fs.mkdirSync(config.dataDir,{recursive:true});
-export const db = typeof config.databaseUrl !== "undefined"
+export const db = config.databaseUrl
   ? new pg.Pool({
       connectionString: config.databaseUrl,
       ssl: config.production ? { rejectUnauthorized: false } : false,
