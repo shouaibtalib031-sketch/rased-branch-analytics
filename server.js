@@ -1,2 +1,2 @@
 import "dotenv/config";
-import "./backend/server.js";
+await import("./backend/server.js");
