@@ -7,10 +7,10 @@ import { config } from "./config.js";
 import { statusOf } from "./rules.js";
 
 fs.mkdirSync(config.dataDir,{recursive:true});
-export const db = process.env.DATABASE_URL
+export const db = typeof config.databaseUrl !== "undefined"
   ? new pg.Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+      connectionString: config.databaseUrl,
+      ssl: config.production ? { rejectUnauthorized: false } : false,
       max: 10
     })
   : new PGlite(config.dataDir);
