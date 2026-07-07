@@ -2,17 +2,21 @@ import "dotenv/config";
 import path from "node:path";
 
 const production=process.env.NODE_ENV==="production";
+const databaseUrl=process.env.DATABASE_URL;
 const jwtSecret=process.env.JWT_SECRET || (production?"":"local-development-secret-change-me-32chars");
-console.log("DATABASE_URL exists:", !!process.env.DATABASE_URL);
-if(production&&typeof process.env.DATABASE_URL==="undefined")throw new Error("DATABASE_URL مطلوب في بيئة الإنتاج");
+console.log("DATABASE_URL exists:", typeof databaseUrl!=="undefined");
+if(production&&typeof databaseUrl==="undefined")throw new Error("DATABASE_URL مطلوب في بيئة الإنتاج");
 if(production&&(!jwtSecret||jwtSecret.length<32))throw new Error("JWT_SECRET يجب أن يكون عشوائيًا وبطول 32 حرفًا على الأقل");
 if(production&&!process.env.ADMIN_EMAIL)throw new Error("ADMIN_EMAIL مطلوب لإنشاء مدير النظام الأول");
 if(production&&(!process.env.ADMIN_PASSWORD||process.env.ADMIN_PASSWORD.length<12))throw new Error("ADMIN_PASSWORD يجب أن يكون بطول 12 حرفًا على الأقل");
 
 export const config = {
   production,
+  nodeEnv: process.env.NODE_ENV || "development",
   host: process.env.HOST || "0.0.0.0",
   port: Number(process.env.PORT || 8080),
+  databaseUrl,
+  trustProxy: process.env.TRUST_PROXY==="false"?false:1,
   jwtSecret,
   adminName: process.env.ADMIN_NAME || "مدير النظام",
   adminEmail: process.env.ADMIN_EMAIL || "admin@rased.sa",
