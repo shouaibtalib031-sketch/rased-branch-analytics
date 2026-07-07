@@ -3,7 +3,8 @@ import path from "node:path";
 
 const production=process.env.NODE_ENV==="production";
 const jwtSecret=process.env.JWT_SECRET || (production?"":"local-development-secret-change-me-32chars");
-if(production&&!process.env.DATABASE_URL)throw new Error("DATABASE_URL مطلوب في بيئة الإنتاج");
+console.log("DATABASE_URL exists:", !!process.env.DATABASE_URL);
+if(production&&typeof process.env.DATABASE_URL==="undefined")throw new Error("DATABASE_URL مطلوب في بيئة الإنتاج");
 if(production&&(!jwtSecret||jwtSecret.length<32))throw new Error("JWT_SECRET يجب أن يكون عشوائيًا وبطول 32 حرفًا على الأقل");
 if(production&&!process.env.ADMIN_EMAIL)throw new Error("ADMIN_EMAIL مطلوب لإنشاء مدير النظام الأول");
 if(production&&(!process.env.ADMIN_PASSWORD||process.env.ADMIN_PASSWORD.length<12))throw new Error("ADMIN_PASSWORD يجب أن يكون بطول 12 حرفًا على الأقل");
