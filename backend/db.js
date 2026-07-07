@@ -8,7 +8,11 @@ import { statusOf } from "./rules.js";
 
 fs.mkdirSync(config.dataDir,{recursive:true});
 export const db = process.env.DATABASE_URL
-  ? new pg.Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.NODE_ENV==="production"?{rejectUnauthorized:true}:undefined,max:10})
+  ? new pg.Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+      max: 10
+    })
   : new PGlite(config.dataDir);
 export const id = () => randomUUID();
 export const q = async (sql, params=[]) => (await db.query(sql, params)).rows;
