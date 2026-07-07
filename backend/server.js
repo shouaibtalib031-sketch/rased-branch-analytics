@@ -10,7 +10,7 @@ import { api } from "./routes.js";
 await initDatabase();
 const app=express(),root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
 const publicRoot=config.production?path.join(root,"dist"):root;
-app.set("trust proxy",process.env.TRUST_PROXY==="false"?false:1);
+app.set("trust proxy",config.trustProxy);
 app.use(helmet({contentSecurityPolicy:false,crossOriginResourcePolicy:false}));
 app.use(express.json({limit:"2mb"}));
 app.use("/api/auth",rateLimit({windowMs:15*60*1000,limit:50,standardHeaders:true,legacyHeaders:false}));
