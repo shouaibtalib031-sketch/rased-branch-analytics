@@ -23,6 +23,7 @@ export const api=Router();
 const rows=async(client,sql,params=[]) => (await client.query(sql,params)).rows;
 const first=async(client,sql,params=[]) => (await client.query(sql,params)).rows[0] || null;
 const cleanKey=value=>String(value||"").trim().replace(/\s+/g," ").replace(/[أإآ]/g,"ا").replace(/ى/g,"ي").replace(/ة/g,"ه").replace(/[^\p{L}\p{N}]+/gu," ").toLowerCase();
+const branchKey=(name="",city="")=>cleanKey(name).replace(/^فرع\s+/,"").replace(cleanKey(city),"").trim();
 const textOf=value=>String(value??"").trim();
 const safeScore=value=>Math.max(0,Math.min(100,Number(value)||0));
 const dueFor=severity=>new Date(Date.now()+({critical:2,high:3,medium:7,low:14}[severity]||7)*86400000).toISOString();
@@ -39,6 +40,8 @@ const categoryOf=(body="",fallback="تشغيل عام")=>{
   const pairs=[["نظافة","نظاف"],["سلامة","سلامه امن حريق خطر"],["تخزين","تخزين مستودع"],["منتج","منتج منتجات جوده تالف"],["تخمير","تخمير"],["معدات","معدات ادوات قلايه فرن"],["أفراد","افراد موظف فريق"],["خدمة","خدمه ضيافه كاشير"],["هوية بصرية","هويه بصر"],["الزي الرسمي","زي رسمي"],["الخبيز","خبيز خبز"],["التجهيز","تجهيز"]];
   return pairs.find(([,words])=>words.split(" ").some(w=>key.includes(w)))?.[0] || textOf(fallback) || "تشغيل عام";
 };
+const reportLog=(event,meta={})=>console.log(event,JSON.stringify(Object.fromEntries(Object.entries(meta).filter(([,v])=>v!==undefined&&v!==null))));
+const reportName=r=>r.original_filename||r.original_name||r.name||"report";
 function normalizeDraft(input={}){
   const observations=[...(input.observations||[]),...(input.notes||[]),...(input.findings||[])].map(o=>({
     body:textOf(o.body||o.note||o.description||o.text),
@@ -78,7 +81,8 @@ function normalizeDraft(input={}){
 }
 async function ensureBranch(client,d){
   const name=d.branchName,city=d.city,regionName=d.region;
-  let branch=await first(client,"select b.id,b.current_score,b.current_status from branches b where lower(trim(b.name))=lower(trim($1)) limit 1",[name]);
+  const key=branchKey(name,city);
+  let branch=(await rows(client,"select b.id,b.name,b.city,b.current_score,b.current_status from branches b where b.active=true")).find(b=>branchKey(b.name,b.city)===key || cleanKey(b.name)===cleanKey(name));
   if(branch)return branch;
   let region=await first(client,"select id from regions where name=$1",[regionName]);
   if(!region){region={id:id()};await client.query("insert into regions(id,name) values($1,$2)",[region.id,regionName])}
@@ -98,7 +102,7 @@ async function persistVisitAnalysis(client,{visit,branchId,supervisorId,draft,us
   const d=normalizeDraft(draft);
   await client.query("delete from observation_images where observation_id in (select id from observations where visit_id=$1)",[visit.id]);
   await client.query("delete from observation_workflow where observation_id in (select id from observations where visit_id=$1)",[visit.id]);
-  for(const table of ["timeline_events","recommendations","ai_analysis","branch_warnings","observations","visit_items"])await client.query(`delete from ${table} where visit_id=$1`,[visit.id]);
+  for(const table of ["timeline_events","recommendations","ai_analysis","branch_warnings","interventions","observations","visit_items"])await client.query(`delete from ${table} where visit_id=$1`,[visit.id]);
   for(const item of d.items){
     const oi=await ensureOperationalItem(client,item.name);
     const previous=await first(client,`select vi.score from visit_items vi join visits v on v.id=vi.visit_id where v.branch_id=$1 and vi.item_id=$2 and v.id<>$3 order by v.visit_date desc,v.created_at desc limit 1`,[branchId,oi.id,visit.id]);
@@ -109,13 +113,17 @@ async function persistVisitAnalysis(client,{visit,branchId,supervisorId,draft,us
     const item=await ensureOperationalItem(client,obs.category);
     const matches=prior.filter(x=>cleanKey(x.category)===cleanKey(obs.category)&&(cleanKey(x.body)===cleanKey(obs.body)||cleanKey(x.body).includes(cleanKey(obs.body))||cleanKey(obs.body).includes(cleanKey(x.body))));
     const observationId=id(),repetitionCount=matches.length+1,isRepeated=matches.length>0;
-    await client.query("insert into observations(id,visit_id,item_id,category,body,severity,state,is_repeated,repetition_count,due_at) values($1,$2,$3,$4,$5,$6,'new',$7,$8,$9)",[observationId,visit.id,item.id,obs.category,obs.body,obs.severity,isRepeated,repetitionCount,dueFor(obs.severity)]);
+    await client.query("insert into observations(id,visit_id,report_id,branch_id,item_id,category,body,severity,state,is_repeated,repetition_count,due_at,followup_created) values($1,$2,$3,$4,$5,$6,$7,$8,'new',$9,$10,$11,true)",[observationId,visit.id,visit.report_id,branchId,item.id,obs.category,obs.body,obs.severity,isRepeated,repetitionCount,dueFor(obs.severity)]);
     await client.query("insert into observation_workflow(id,observation_id,from_state,to_state,actor_id,comment) values($1,$2,null,'new',$3,$4)",[id(),observationId,userId,"تم إنشاء متابعة تلقائية من تقرير الزيارة"]);
     await client.query("insert into timeline_events(id,branch_id,visit_id,observation_id,event_type,title,details,actor_id) values($1,$2,$3,$4,'observation_created','اكتشاف ملاحظة',$5,$6)",[id(),branchId,visit.id,observationId,JSON.stringify({body:obs.body,category:obs.category,severity:obs.severity,repetitionCount}),userId]);
+    if(["high","critical"].includes(obs.severity)||repetitionCount>2)await client.query("insert into interventions(id,branch_id,visit_id,report_id,observation_id,reason,severity,intervention_type) values($1,$2,$3,$4,$5,$6,$7,$8)",[id(),branchId,visit.id,visit.report_id,observationId,obs.body,obs.severity,obs.severity==="critical"?"urgent_intervention":"followup"]);
     if(obs.imageFinding){
       const reportPath=(await first(client,"select storage_path from reports where id=$1",[visit.report_id]))?.storage_path||"";
       await client.query("insert into observation_images(id,observation_id,kind,storage_path,ai_findings) values($1,$2,'evidence',$3,$4)",[id(),observationId,reportPath,JSON.stringify(obs.imageFinding)]);
     }
+  }
+  if(Number(d.finalScore)<60||Number(d.finalScore)-Number(visit.previous_score||d.finalScore)<-10){
+    await client.query("insert into interventions(id,branch_id,visit_id,report_id,reason,severity,intervention_type) values($1,$2,$3,$4,$5,$6,$7)",[id(),branchId,visit.id,visit.report_id,Number(d.finalScore)<60?"تقييم الفرع أقل من 60":"تراجع حاد أكثر من 10 نقاط",Number(d.finalScore)<60?"critical":"high",Number(d.finalScore)<60?"urgent_intervention":"re_evaluation"]);
   }
   for(const warning of d.warnings){
     await client.query("insert into branch_warnings(id,branch_id,visit_id,report_id,supervisor_id,warning_date,reason,item_name,question_number,report_number,warning_text) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",[id(),branchId,visit.id,visit.report_id,supervisorId,d.visitDate,warning.reason,warning.itemName,warning.questionNumber,d.reportNumber||visit.report_id,warning.warningText]);
@@ -130,6 +138,22 @@ async function persistVisitAnalysis(client,{visit,branchId,supervisorId,draft,us
     for(const user of adminUsers)await client.query("insert into notifications(id,user_id,type,title,body,entity_type,entity_id) values($1,$2,'alert',$3,$4,'visit',$5)",[id(),user.id,`زيارة تحتاج متابعة: ${d.branchName}`,`التقييم ${d.finalScore}%، الملاحظات ${d.observations.length}، الإنذارات ${d.warnings.length}`,visit.id]);
   }
   return {observations:d.observations.length,warnings:d.warnings.length,items:d.items.length};
+}
+async function backfillOrphanUploads(userId){
+  const files=await fs.promises.readdir(config.uploadDir,{withFileTypes:true}).catch(()=>[]);
+  let created=0;
+  for(const entry of files){
+    if(!entry.isFile()||entry.name===".gitkeep")continue;
+    const storagePath=path.join(config.uploadDir,entry.name);
+    const exists=await one("select id from reports where storage_path=$1 or stored_filename=$2",[storagePath,entry.name]);
+    if(exists)continue;
+    const stat=await fs.promises.stat(storagePath).catch(()=>null);
+    const detected=await fileTypeFromFile(storagePath).catch(()=>null);
+    await db.query(`insert into reports(id,original_name,original_filename,stored_filename,mime_type,size_bytes,file_size,storage_path,status,upload_status,analysis_status,analysis_error,uploaded_by,uploaded_at)
+      values($1,$2,$2,$3,$4,$5,$6,$7,'uploaded','uploaded','uploaded','تم إنشاء السجل تلقائيًا لملف موجود في التخزين دون سجل سابق',$8,now())`,[id(),entry.name,entry.name,detected?.mime||"application/octet-stream",stat?.size||0,stat?.size||0,storagePath,userId||null]);
+    created++;
+  }
+  return created;
 }
 api.post("/auth/login",async(req,res)=>{const data=await login(req.body.email,req.body.password);await db.query("insert into login_logs(user_id,email,success,ip,user_agent) values($1,$2,$3,$4,$5)",[data?.user?.id||null,req.body.email,!!data,req.ip,req.headers["user-agent"]||""]);if(!data)return res.status(401).json({error:"البريد الإلكتروني أو كلمة المرور غير صحيحة"});res.json(data)});
 api.use(authenticate);
@@ -171,22 +195,87 @@ api.patch("/branches/:id",allow("system_admin","operations_manager"),async(req,r
 api.delete("/branches/:id",allow("system_admin"),async(req,res)=>{const before=await one("select * from branches where id=$1",[req.params.id]);if(!before)return res.status(404).json({error:"الفرع غير موجود"});await db.query("update branches set active=false where id=$1",[req.params.id]);await audit(req,"branch.archive","branch",req.params.id,before,{active:false});res.json({ok:true,archived:true})});
 api.get("/branches/:id",async(req,res)=>{const branch=await one("select b.*,r.name region from branches b join regions r on r.id=b.region_id where b.id=$1",[req.params.id]);if(!branch)return res.status(404).json({error:"الفرع غير موجود"});const visits=await q(`select v.*,u.full_name supervisor from visits v left join supervisors s on s.id=v.supervisor_id left join users u on u.id=s.user_id where branch_id=$1 and workflow_state='approved' order by visit_date desc,created_at desc`,[req.params.id]);const health=await branchHealthDetails(req.params.id);res.json({branch,visits,periods:await periods(req.params.id),healthScore:health.score,health,prediction:await prediction(req.params.id),timeline:await branchTimeline(req.params.id),itemTrends:await itemTrends(req.params.id),warnings:await q(`select w.*,u.full_name inspector,r.original_name report_name from branch_warnings w left join supervisors s on s.id=w.supervisor_id left join users u on u.id=s.user_id left join reports r on r.id=w.report_id where w.branch_id=$1 order by w.warning_date desc`,[req.params.id]),observations:await q("select o.* from observations o join visits v on v.id=o.visit_id where v.branch_id=$1 and v.workflow_state='approved' order by o.created_at desc",[req.params.id])})});
 
-api.get("/reports",async(_req,res)=>res.json(await q("select id,original_name,mime_type,size_bytes,status,created_at from reports order by created_at desc")));
+api.get("/reports",async(req,res)=>{
+ await backfillOrphanUploads(req.user?.sub);
+ const p=reportPeriod(req.query);
+ const records=await q(`select r.id,
+  coalesce(r.original_filename,r.original_name) original_filename,
+  coalesce(r.stored_filename,r.storage_path) stored_filename,
+  r.storage_path,r.mime_type,coalesce(r.file_size,r.size_bytes) file_size,
+  coalesce(r.upload_status,'uploaded') upload_status,
+  coalesce(r.analysis_status,r.status,'uploaded') analysis_status,
+  r.analysis_error,r.branch_id,r.visit_id,r.supervisor_id,
+  coalesce(r.uploaded_at,r.created_at) uploaded_at,r.analysis_started_at,r.analysis_completed_at,
+  b.name branch,b.city,u.full_name supervisor,v.visit_date,v.final_score,
+  case coalesce(r.analysis_status,r.status,'uploaded') when 'completed' then 100 when 'analyzing' then 50 when 'failed' then 100 else 0 end progress
+  from reports r
+  left join branches b on b.id=r.branch_id
+  left join visits v on v.id=r.visit_id
+  left join supervisors s on s.id=r.supervisor_id
+  left join users u on u.id=s.user_id
+  where coalesce(v.visit_date::date,coalesce(r.uploaded_at,r.created_at)::date) between $1 and $2
+  order by coalesce(r.uploaded_at,r.created_at) desc`,[p.from,p.to]);
+ res.json(records);
+});
 api.post("/reports/upload",allow("system_admin","operations_manager","supervisor"),upload.array("reports"),async(req,res)=>{
- const rows=[];for(const f of req.files){const ext=path.extname(f.originalname).toLowerCase(),detected=await fileTypeFromFile(f.path);if(!detected||!validMimeByExtension[ext]?.includes(detected.mime)){await fs.promises.unlink(f.path).catch(()=>{});return res.status(400).json({error:`محتوى الملف لا يطابق نوعه: ${f.originalname}`})}const reportId=id();await db.query("insert into reports(id,original_name,mime_type,size_bytes,storage_path,uploaded_by) values($1,$2,$3,$4,$5,$6)",[reportId,f.originalname,detected.mime,f.size,f.path,req.user.sub]);await audit(req,"report.upload","report",reportId,null,{name:f.originalname,mime:detected.mime});rows.push({id:reportId,name:f.originalname,size:f.size,status:"uploaded"})}res.status(201).json(rows);
+ const rows=[];
+ for(const f of req.files){
+   reportLog("REPORT_UPLOAD_STARTED",{filename:f.originalname,size:f.size});
+   const ext=path.extname(f.originalname).toLowerCase(),detected=await fileTypeFromFile(f.path);
+   if(!detected||!validMimeByExtension[ext]?.includes(detected.mime)){await fs.promises.unlink(f.path).catch(()=>{});return res.status(400).json({error:`محتوى الملف لا يطابق نوعه: ${f.originalname}`})}
+   const reportId=id(),stored=path.basename(f.path);
+   await db.query(`insert into reports(id,original_name,original_filename,stored_filename,mime_type,size_bytes,file_size,storage_path,status,upload_status,analysis_status,uploaded_by,uploaded_at)
+    values($1,$2,$2,$3,$4,$5,$6,$7,'uploaded','uploaded','uploaded',$8,now())`,[reportId,f.originalname,stored,detected.mime,f.size,f.size,f.path,req.user.sub]);
+   await audit(req,"report.upload","report",reportId,null,{name:f.originalname,mime:detected.mime});
+   reportLog("REPORT_SAVED",{reportId,filename:f.originalname});
+   rows.push({id:reportId,name:f.originalname,original_filename:f.originalname,size:f.size,status:"uploaded",analysis_status:"uploaded"});
+ }
+ res.status(201).json(rows);
 });
 api.post("/reports/:id/analyze",allow("system_admin","operations_manager","supervisor"),async(req,res)=>{
  const report=await one("select * from reports where id=$1",[req.params.id]);if(!report)return res.status(404).json({error:"التقرير غير موجود"});
- const result=normalizeDraft(await analyzeFile({path:report.storage_path,originalname:report.original_name,mimetype:report.mime_type}));
- const branch=await one("select b.id,b.current_score from branches b where lower(trim(b.name))=lower(trim($1))",[result.branchName]);const inspector=await ensureSupervisor(result.inspectorName);const visitId=id();
- await db.query("insert into visits(id,report_id,branch_id,supervisor_id,visit_date,final_score,previous_score,status,workflow_state,extraction_confidence,draft_data) values($1,$2,$3,$4,$5,$6,$7,$8,'review',95,$9)",[visitId,report.id,branch?.id||null,inspector.id,result.visitDate,result.finalScore,branch?.current_score||null,statusOf(result.finalScore),JSON.stringify(result)]);
- await db.query("update reports set status='analyzed' where id=$1",[report.id]);await db.query("insert into ai_analysis values($1,$2,$3,'v1',$4,$5,$6,$7,$8,now())",[id(),visitId,config.openaiModel,result.summary,JSON.stringify(result.items.filter(i=>i.score>=85)),JSON.stringify(result.items.filter(i=>i.score<70)),result.urgent,JSON.stringify(result)]);
- await audit(req,"report.analyze","visit",visitId,null,{...result,inspectorCreated:!!inspector.created});res.json({visitId,reportId:report.id,confidence:95,data:result,inspector:{id:inspector.id,name:inspector.name,created:!!inspector.created}});
+ try{
+   await db.query("update reports set status='analyzing',analysis_status='analyzing',analysis_error=null,analysis_started_at=now() where id=$1",[report.id]);
+   reportLog("TEXT_EXTRACTION_STARTED",{reportId:report.id,filename:reportName(report)});
+   reportLog("ANALYSIS_STARTED",{reportId:report.id});
+   const result=normalizeDraft(await analyzeFile({path:report.storage_path,originalname:reportName(report),mimetype:report.mime_type}));
+   reportLog("ANALYSIS_COMPLETED",{reportId:report.id,items:result.items.length,observations:result.observations.length,warnings:result.warnings.length});
+   const inspector=await ensureSupervisor(result.inspectorName);
+   const saved=await transaction(async client=>{
+     reportLog("DATABASE_PERSIST_STARTED",{reportId:report.id});
+     const branch=await ensureBranch(client,result);
+     let visit=await first(client,"select * from visits where report_id=$1 order by created_at desc limit 1",[report.id]);
+     const previous=await first(client,"select final_score from visits where branch_id=$1 and report_id<>$2 and workflow_state='approved' order by visit_date desc,created_at desc limit 1",[branch.id,report.id]);
+     if(!visit){
+       visit={id:id(),report_id:report.id};
+       await client.query("insert into visits(id,report_id,branch_id,supervisor_id,visit_date,final_score,previous_score,status,workflow_state,extraction_confidence,draft_data,approved_by,approved_at) values($1,$2,$3,$4,$5,$6,$7,$8,'approved',95,$9,$10,now())",[visit.id,report.id,branch.id,inspector.id,result.visitDate,result.finalScore,previous?.final_score??null,statusOf(result.finalScore),JSON.stringify(result),req.user.sub]);
+     }else{
+       await client.query("update visits set branch_id=$2,supervisor_id=$3,visit_date=$4,final_score=$5,previous_score=$6,status=$7,workflow_state='approved',extraction_confidence=95,draft_data=$8,approved_by=$9,approved_at=now() where id=$1",[visit.id,branch.id,inspector.id,result.visitDate,result.finalScore,previous?.final_score??visit.previous_score??null,statusOf(result.finalScore),JSON.stringify(result),req.user.sub]);
+     }
+     const latest=await first(client,"select id from visits where branch_id=$1 and workflow_state='approved' order by visit_date desc,created_at desc limit 1",[branch.id]);
+     if(latest?.id===visit.id)await client.query("update branches set current_score=$2,current_status=$3,city=$4 where id=$1",[branch.id,result.finalScore,statusOf(result.finalScore),result.city]);
+     const counters=await persistVisitAnalysis(client,{visit:{...visit,report_id:report.id,branch_id:branch.id,supervisor_id:inspector.id,previous_score:previous?.final_score??visit.previous_score??null},branchId:branch.id,supervisorId:inspector.id,draft:result,userId:req.user.sub});
+     await client.query("update reports set status='completed',analysis_status='completed',analysis_error=null,branch_id=$2,visit_id=$3,supervisor_id=$4,analysis_completed_at=now() where id=$1",[report.id,branch.id,visit.id,inspector.id]);
+     reportLog("DATABASE_PERSIST_COMPLETED",{reportId:report.id,visitId:visit.id,branchId:branch.id,...counters});
+     return {visitId:visit.id,branchId:branch.id,counters};
+   });
+   clearCache();
+   const insight=await generateVisitInsight(saved.visitId);
+   await audit(req,"report.analyze","visit",saved.visitId,null,{...result,inspectorCreated:!!inspector.created,...saved.counters});
+   res.json({visitId:saved.visitId,reportId:report.id,branchId:saved.branchId,confidence:95,data:result,insight,inspector:{id:inspector.id,name:inspector.name,created:!!inspector.created},...saved.counters});
+ }catch(error){
+   reportLog("REPORT_ANALYSIS_FAILED",{reportId:report.id,error:error.message});
+   await db.query("update reports set status='failed',analysis_status='failed',analysis_error=$2,analysis_completed_at=now() where id=$1",[report.id,error.message]);
+   res.status(500).json({error:`فشل تحليل التقرير: ${error.message}`});
+ }
 });
 api.get("/reports/:id/review",async(req,res)=>{const v=await one("select * from visits where id=$1",[req.params.id]);if(!v)return res.status(404).json({error:"المسودة غير موجودة"});res.json(v)});
-api.get("/reports/:id/file",async(req,res)=>{const report=await one("select * from reports where id=$1",[req.params.id]);if(!report||!fs.existsSync(report.storage_path))return res.status(404).json({error:"ملف التقرير غير موجود"});const detected=await fileTypeFromFile(report.storage_path);const contentType=detected?.mime||"text/plain; charset=utf-8";res.setHeader("Content-Type",contentType);res.setHeader("X-Content-Type-Options","nosniff");res.setHeader("Content-Disposition",`inline; filename*=UTF-8''${encodeURIComponent(report.original_name)}`);res.sendFile(path.resolve(report.storage_path))});
+api.get("/reports/:id/file",async(req,res)=>{const report=await one("select * from reports where id=$1",[req.params.id]);if(!report||!fs.existsSync(report.storage_path))return res.status(404).json({error:"ملف التقرير غير موجود"});const detected=await fileTypeFromFile(report.storage_path);const contentType=detected?.mime||"text/plain; charset=utf-8";res.setHeader("Content-Type",contentType);res.setHeader("X-Content-Type-Options","nosniff");res.setHeader("Content-Disposition",`inline; filename*=UTF-8''${encodeURIComponent(reportName(report))}`);res.sendFile(path.resolve(report.storage_path))});
 api.put("/reports/:id/review",allow("system_admin","operations_manager","supervisor"),async(req,res)=>{const before=await one("select draft_data from visits where id=$1",[req.params.id]);await db.query("update visits set draft_data=$2,final_score=$3,visit_date=$4,status=$5 where id=$1 and workflow_state='review'",[req.params.id,JSON.stringify(req.body),req.body.finalScore,req.body.visitDate,statusOf(req.body.finalScore)]);await audit(req,"report.review","visit",req.params.id,before?.draft_data,req.body);res.json({ok:true})});
+api.post("/reports/:id/reanalyze",allow("system_admin","operations_manager","supervisor"),async(req,res)=>res.redirect(307,`/api/reports/${req.params.id}/analyze`));
 api.post("/reports/:id/approve",allow("system_admin","operations_manager"),async(req,res)=>{
+ const existing=await one("select * from visits where id=$1",[req.params.id]);
+ if(existing?.workflow_state==="approved")return res.json({ok:true,branchId:existing.branch_id,alreadyApproved:true});
  const v=await one("select * from visits where id=$1 and workflow_state='review'",[req.params.id]);if(!v)return res.status(404).json({error:"المسودة غير موجودة أو معتمدة"});
  const d=normalizeDraft(v.draft_data||{});
  const inspector=await ensureSupervisor(d.inspectorName);
@@ -197,19 +286,29 @@ api.post("/reports/:id/approve",allow("system_admin","operations_manager"),async
    const latest=await first(client,"select id from visits where branch_id=$1 and workflow_state='approved' order by visit_date desc,created_at desc limit 1",[branch.id]);
    if(latest?.id===v.id)await client.query("update branches set current_score=$2,current_status=$3,city=$4 where id=$1",[branch.id,d.finalScore,statusOf(d.finalScore),d.city]);
    const counters=await persistVisitAnalysis(client,{visit:{...v,branch_id:branch.id,supervisor_id:inspector.id,previous_score:previous?.final_score??v.previous_score??null},branchId:branch.id,supervisorId:inspector.id,draft:d,userId:req.user.sub});
-   await client.query("update reports set status='approved' where id=$1",[v.report_id]);
+   await client.query("update reports set status='completed',analysis_status='completed',analysis_error=null,branch_id=$2,visit_id=$3,supervisor_id=$4,analysis_completed_at=coalesce(analysis_completed_at,now()) where id=$1",[v.report_id,branch.id,v.id,inspector.id]);
    return {branchId:branch.id,counters};
  });
  const insight=await generateVisitInsight(v.id);clearCache();await audit(req,"report.approve","visit",v.id,{workflow:"review"},{workflow:"approved",...result.counters});res.json({ok:true,branchId:result.branchId,insight,...result.counters});
 });
+api.delete("/reports/:id",allow("system_admin"),async(req,res)=>{
+ const report=await one("select * from reports where id=$1",[req.params.id]);if(!report)return res.status(404).json({error:"التقرير غير موجود"});
+ await transaction(async client=>{
+   await client.query("update reports set visit_id=null,branch_id=null,supervisor_id=null where id=$1",[report.id]);
+   await client.query("update visits set report_id=null where report_id=$1",[report.id]);
+   await client.query("delete from visits where report_id=$1 or id=$2",[report.id,report.visit_id||""]);
+   await client.query("delete from reports where id=$1",[report.id]);
+ });
+ await audit(req,"report.delete","report",report.id,report,null);clearCache();res.json({ok:true});
+});
 
 api.get("/observations",async(req,res)=>{const p=reportPeriod(req.query);const rows=await q(`select o.*,oi.name item_name,b.name branch,u.full_name supervisor from observations o join visits v on v.id=o.visit_id join branches b on b.id=v.branch_id left join operational_items oi on oi.id=o.item_id left join supervisors s on s.id=v.supervisor_id left join users u on u.id=s.user_id where v.workflow_state='approved' and v.visit_date between $1 and $2 order by case when o.state='overdue' then 0 else 1 end,o.created_at desc`,[p.from,p.to]);res.json(rows)});
-api.post("/observations",allow("system_admin","operations_manager","supervisor"),async(req,res)=>{const visit=await one("select id from visits where branch_id=$1 and workflow_state='approved' order by visit_date desc limit 1",[req.body.branchId]);if(!visit)return res.status(400).json({error:"لا توجد زيارة معتمدة للفرع"});if(!req.body.body?.trim())return res.status(400).json({error:"نص الملاحظة مطلوب"});const observation={id:id(),visit_id:visit.id,category:req.body.category||"تشغيل عام",body:req.body.body.trim(),severity:req.body.severity||"medium"};await db.query("insert into observations(id,visit_id,category,body,severity,state,due_at) values($1,$2,$3,$4,$5,'new',$6)",[observation.id,observation.visit_id,observation.category,observation.body,observation.severity,req.body.dueAt||null]);await audit(req,"observation.create","observation",observation.id,null,observation);clearCache();res.status(201).json(observation)});
+api.post("/observations",allow("system_admin","operations_manager","supervisor"),async(req,res)=>{const visit=await one("select id,report_id,branch_id from visits where branch_id=$1 and workflow_state='approved' order by visit_date desc limit 1",[req.body.branchId]);if(!visit)return res.status(400).json({error:"لا توجد زيارة معتمدة للفرع"});if(!req.body.body?.trim())return res.status(400).json({error:"نص الملاحظة مطلوب"});const item=await ensureOperationalItem(db,req.body.category||"تشغيل عام");const observation={id:id(),visit_id:visit.id,report_id:visit.report_id,branch_id:visit.branch_id,item_id:item.id,category:req.body.category||"تشغيل عام",body:req.body.body.trim(),severity:req.body.severity||"medium"};await db.query("insert into observations(id,visit_id,report_id,branch_id,item_id,category,body,severity,state,due_at,followup_created) values($1,$2,$3,$4,$5,$6,$7,$8,'new',$9,true)",[observation.id,observation.visit_id,observation.report_id,observation.branch_id,observation.item_id,observation.category,observation.body,observation.severity,req.body.dueAt||null]);await db.query("insert into observation_workflow(id,observation_id,from_state,to_state,actor_id,comment) values($1,$2,null,'new',$3,$4)",[id(),observation.id,req.user.sub,"تم إنشاء متابعة يدوية"]);await audit(req,"observation.create","observation",observation.id,null,observation);clearCache();res.status(201).json(observation)});
 api.patch("/observations/:id",allow("system_admin","operations_manager","branch_manager","supervisor"),async(req,res)=>{const before=await one("select * from observations where id=$1",[req.params.id]);await db.query("update observations set state=coalesce($2,state),assignee_id=coalesce($3,assignee_id),due_at=coalesce($4,due_at),closed_at=case when $2 in ('closed','completed') then now() else closed_at end where id=$1",[req.params.id,req.body.state||null,req.body.assigneeId||null,req.body.dueAt||null]);if(req.body.state&&req.body.state!==before?.state)await db.query("insert into observation_workflow values($1,$2,$3,$4,$5,$6,now())",[id(),req.params.id,before.state,req.body.state,req.user.sub,req.body.comment||null]);clearCache();await audit(req,"observation.update","observation",req.params.id,before,req.body);res.json({ok:true})});
 api.get("/observations/:id/workflow",async(req,res)=>res.json(await q(`select w.*,u.full_name actor from observation_workflow w left join users u on u.id=w.actor_id where observation_id=$1 order by created_at`,[req.params.id])));
 api.delete("/observations/:id",allow("system_admin"),async(req,res)=>{const before=await one("select * from observations where id=$1",[req.params.id]);if(!before)return res.status(404).json({error:"الملاحظة غير موجودة"});await audit(req,"observation.delete","observation",req.params.id,before,null);await db.query("delete from observations where id=$1",[req.params.id]);clearCache();res.json({ok:true})});
 api.post("/observations/:id/images/:kind",allow("system_admin","operations_manager","branch_manager","supervisor"),upload.single("image"),async(req,res)=>{if(!["before","after"].includes(req.params.kind))return res.status(400).json({error:"نوع الصورة غير صحيح"});const o=await one("select o.*,v.branch_id from observations o join visits v on v.id=o.visit_id where o.id=$1",[req.params.id]);if(!o)return res.status(404).json({error:"الملاحظة غير موجودة"});const next=req.params.kind==="before"?"in_progress":"completed";await db.query("update observations set state=$2 where id=$1",[o.id,next]);await db.query("insert into observation_workflow values($1,$2,$3,$4,$5,$6,now())",[id(),o.id,o.state,next,req.user.sub,`رفع صورة ${req.params.kind}`]);await db.query("insert into timeline_events values($1,$2,$3,$4,$5,$6,$7,$8,now())",[id(),o.branch_id,o.visit_id,o.id,`image_${req.params.kind}`,req.params.kind==="before"?"رفع صورة قبل التنفيذ":"رفع صورة بعد التنفيذ",JSON.stringify({path:req.file.path}),req.user.sub]);res.json({ok:true,state:next})});
-api.get("/interventions",async(_req,res)=>{const all=await branchList("asc",200),out=[];for(const b of all){const flags=await q(`select o.* from observations o join visits v on v.id=o.visit_id where v.branch_id=$1 and (o.repetition_count>2 or o.severity in ('high','critical') or o.state='overdue')`,[b.id]);if(Number(b.score)<60||Number(b.delta)<-10||flags.length)out.push({...b,healthScore:await branchHealth(b.id),triggers:{lowScore:Number(b.score)<60,sharpDecline:Number(b.delta)<-10,observations:flags}})}res.json(out)});
+api.get("/interventions",async(_req,res)=>{const all=await branchList("asc",200),out=[];for(const b of all){const flags=await q(`select o.* from observations o where o.branch_id=$1 and (o.repetition_count>2 or o.severity in ('high','critical') or o.state='overdue')`,[b.id]);const saved=await q("select * from interventions where branch_id=$1 order by created_at desc",[b.id]);if(Number(b.score)<60||Number(b.delta)<-10||flags.length||saved.length)out.push({...b,healthScore:await branchHealth(b.id),triggers:{lowScore:Number(b.score)<60,sharpDecline:Number(b.delta)<-10,observations:flags,interventions:saved}})}res.json(out)});
 api.get("/supervisors/analytics",async(req,res)=>{const p=reportPeriod(req.query);res.json(await q(`select s.id,u.full_name name,count(distinct v.id)::int visits,round(avg(distinct v.final_score),1) average,count(o.id)::int observations,round(avg(distinct v.final_score)-(select avg(final_score) from visits where workflow_state='approved' and visit_date between $1 and $2),1) bias,round(avg(v.extraction_confidence),1) report_quality,count(o.id) filter(where o.category in('جودة','منتج'))::int quality_findings,count(o.id) filter(where o.category='سلامة')::int safety_findings,case when avg(v.final_score)<(select avg(final_score) from visits where workflow_state='approved' and visit_date between $1 and $2)-3 then 'strict' when avg(v.final_score)>(select avg(final_score) from visits where workflow_state='approved' and visit_date between $1 and $2)+3 then 'lenient' else 'balanced' end style from visits v join supervisors s on s.id=v.supervisor_id join users u on u.id=s.user_id left join observations o on o.visit_id=v.id where v.workflow_state='approved' and v.visit_date between $1 and $2 group by s.id,u.full_name order by report_quality desc nulls last,visits desc`,[p.from,p.to]))});
 api.get("/reports/monthly",async(req,res)=>{const month=req.query.month||new Date().toISOString().slice(0,7);res.json({month,summary:await one(`select count(*)::int visits,round(avg(final_score),1) average,max(final_score) highest,min(final_score) lowest from visits where to_char(visit_date,'YYYY-MM')=$1 and workflow_state='approved'`,[month]),branches:await q(`select b.name,round(avg(v.final_score),1) average,count(*)::int visits from visits v join branches b on b.id=v.branch_id where to_char(v.visit_date,'YYYY-MM')=$1 and v.workflow_state='approved' group by b.id,b.name order by average desc`,[month])})});
 api.get("/notifications",async(req,res)=>res.json(await q("select * from notifications where user_id=$1 order by created_at desc",[req.user.sub])));

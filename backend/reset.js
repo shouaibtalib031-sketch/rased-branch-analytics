@@ -23,7 +23,9 @@ export async function resetOperationalData({simulateFailure=false}={}){
     counts=await transaction(async client=>{
       const count=async table=>Number((await client.query(`select count(*)::int n from ${table}`)).rows[0]?.n||0);
       const before={branches:await count("branches"),reports:await count("reports"),visits:await count("visits"),observations:await count("observations"),warnings:await count("branch_warnings"),supervisors:await count("supervisors")};
-      for(const table of ["observation_workflow","timeline_events","observation_images","recommendations","ai_analysis","branch_warnings","observations","visit_items","visits","reports","notifications","ai_conversations","scheduled_reports","audit_logs","login_logs"])await client.query(`delete from ${table}`);
+      await client.query("update reports set visit_id=null,branch_id=null,supervisor_id=null");
+      await client.query("update visits set report_id=null");
+      for(const table of ["observation_workflow","timeline_events","observation_images","recommendations","ai_analysis","branch_warnings","interventions","observations","visit_items","visits","reports","notifications","ai_conversations","scheduled_reports","audit_logs","login_logs"])await client.query(`delete from ${table}`);
       if(simulateFailure)throw new Error("SIMULATED_RESET_FAILURE");
       await client.query("delete from supervisors");
       await client.query("delete from branches");

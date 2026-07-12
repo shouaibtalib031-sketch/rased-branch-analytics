@@ -11,24 +11,29 @@ const warning={type:"object",additionalProperties:false,properties:{reason:{type
 const schema={type:"object",additionalProperties:false,properties:{branchName:{type:"string"},city:{type:"string"},region:{type:"string"},visitDate:{type:"string"},inspectorName:{type:"string"},reportNumber:{type:"string"},finalScore:{type:"number"},items:{type:"array",items:{type:"object",additionalProperties:false,properties:{name:{type:"string"},score:{type:"number"},notes:{type:"string"}},required:["name","score","notes"]}},observations:{type:"array",items:{type:"object",additionalProperties:false,properties:{body:{type:"string"},category:{type:"string"},severity:{type:"string",enum:["low","medium","high","critical"]},recommendation:{type:"string"}},required:["body","category","severity","recommendation"]}},warnings:{type:"array",items:warning},imageFindings:{type:"array",items:finding},summary:{type:"string"},managementRecommendation:{type:"string"},branchRecommendation:{type:"string"},urgent:{type:"boolean"}},required:["branchName","city","region","visitDate","inspectorName","reportNumber","finalScore","items","observations","warnings","imageFindings","summary","managementRecommendation","branchRecommendation","urgent"]};
 
 async function extractText(file){
+  console.log("TEXT_EXTRACTION_STARTED",JSON.stringify({filename:file.originalname}));
   const ext=path.extname(file.originalname).toLowerCase(),buf=await fs.readFile(file.path);
-  if(ext===".pdf"){const p=new PDFParse({data:buf});const r=await p.getText();await p.destroy();return r.text}
-  if(ext===".xlsx"){const wb=new ExcelJS.Workbook();await wb.xlsx.load(buf);const lines=[];wb.eachSheet(ws=>ws.eachRow(row=>lines.push(row.values.slice(1).map(v=>typeof v==="object"?JSON.stringify(v):String(v??"")).join(" | "))));return lines.join("\n")}
-  if(ext===".docx")return (await mammoth.extractRawText({buffer:buf})).value;
-  return "";
+  let text="";
+  if(ext===".pdf"){const p=new PDFParse({data:buf});const r=await p.getText();await p.destroy();text=r.text}
+  else if(ext===".xlsx"){const wb=new ExcelJS.Workbook();await wb.xlsx.load(buf);const lines=[];wb.eachSheet(ws=>ws.eachRow(row=>lines.push(row.values.slice(1).map(v=>typeof v==="object"?JSON.stringify(v):String(v??"")).join(" | "))));text=lines.join("\n")}
+  else if(ext===".docx")text=(await mammoth.extractRawText({buffer:buf})).value;
+  console.log("TEXT_EXTRACTION_COMPLETED",JSON.stringify({filename:file.originalname,characters:text.length}));
+  return text;
 }
 export async function analyzeFile(file){
   const ext=path.extname(file.originalname).toLowerCase(),isImage=[".png",".jpg",".jpeg",".webp"].includes(ext);
   const reportText=isImage?"":await extractText(file);
-  if(!config.openaiKey)return deterministicExtraction(file.originalname,reportText);
+  if(!config.openaiKey){console.log("ANALYSIS_STARTED",JSON.stringify({filename:file.originalname,mode:"deterministic"}));const output=deterministicExtraction(file.originalname,reportText);console.log("ANALYSIS_COMPLETED",JSON.stringify({filename:file.originalname,mode:"deterministic",observations:output.observations.length,warnings:output.warnings.length}));return output}
   const client=new OpenAI({apiKey:config.openaiKey});
   const content=[{type:"input_text",text:`استخرج تقرير زيارة الفرع التالي بدقة. استخرج اسم "المراقب" الذي نفذ الزيارة فقط، وتجاهل أي اسم يظهر بصفة "المشرف". استخرج كل عبارة إنذار كما وردت حرفيًا، مع سببها وبندها ورقم السؤال إن وجد. الإنذارات سجل تاريخي وليست ملاحظات متابعة. استخرج جميع الملاحظات التشغيلية ولا تتركها فارغة إذا كانت موجودة في النص. لا تخمن الحقول غير الموجودة، واستخدم نصًا فارغًا عند غياب رقم السؤال أو التقرير. النص:\n${isImage?"الصورة مرفقة":reportText}`}];
   if(isImage)content.push({type:"input_image",image_url:`data:${file.mimetype};base64,${(await fs.readFile(file.path)).toString("base64")}`});
+  console.log("ANALYSIS_STARTED",JSON.stringify({filename:file.originalname,mode:"openai",model:config.openaiModel}));
   const response=await client.responses.create({model:config.openaiModel,input:[{role:"system",content:"أنت محلل تدقيق تشغيلي. ميّز بدقة بين المراقب والمشرف: المطلوب هو المراقب فقط. أخرج البيانات العربية المنظمة حسب المخطط وحافظ على نص الإنذار حرفيًا."},{role:"user",content}],text:{format:{type:"json_schema",name:"branch_visit",strict:true,schema}}});
   const parsed=JSON.parse(response.output_text),fallback=deterministicExtraction(file.originalname,reportText);
   if(!parsed.observations?.length)parsed.observations=fallback.observations;
   if(!parsed.warnings?.length)parsed.warnings=fallback.warnings;
   if(!parsed.items?.length)parsed.items=fallback.items;
+  console.log("ANALYSIS_COMPLETED",JSON.stringify({filename:file.originalname,mode:"openai",observations:parsed.observations.length,warnings:parsed.warnings.length}));
   return parsed;
 }
 function clean(value=""){return String(value).replace(/\s+/g," ").trim()}
