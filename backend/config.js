@@ -4,11 +4,15 @@ import path from "node:path";
 const production=process.env.NODE_ENV==="production";
 const databaseUrl=typeof process.env.DATABASE_URL==="string"?process.env.DATABASE_URL.trim():undefined;
 const jwtSecret=process.env.JWT_SECRET || (production?"":"local-development-secret-change-me-32chars");
+const storageRoot=path.resolve(process.env.RASED_STORAGE_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || (production?"/data/rased":"./storage"));
+const uploadDir=path.resolve(process.env.UPLOAD_DIR || path.join(storageRoot,"uploads"));
+const outputPdfDir=path.resolve(process.env.OUTPUT_PDF_DIR || path.join(storageRoot,"reports"));
 console.log("DATABASE_URL exists:", !!databaseUrl);
 if(production&&!databaseUrl)throw new Error("DATABASE_URL مطلوب في بيئة الإنتاج");
 if(production&&(!jwtSecret||jwtSecret.length<32))throw new Error("JWT_SECRET يجب أن يكون عشوائيًا وبطول 32 حرفًا على الأقل");
 if(production&&!process.env.ADMIN_EMAIL)throw new Error("ADMIN_EMAIL مطلوب لإنشاء مدير النظام الأول");
 if(production&&(!process.env.ADMIN_PASSWORD||process.env.ADMIN_PASSWORD.length<12))throw new Error("ADMIN_PASSWORD يجب أن يكون بطول 12 حرفًا على الأقل");
+if(production&&["/tmp","/var/tmp","/private/tmp","/app"].some(dir=>uploadDir===dir||uploadDir.startsWith(`${dir}/`)))throw new Error("UPLOAD_DIR يجب أن يكون مسار تخزين دائم وليس مسارًا مؤقتًا داخل الحاوية");
 
 export const config = {
   production,
@@ -25,7 +29,8 @@ export const config = {
   openaiKey: process.env.OPENAI_API_KEY || "",
   openaiModel: process.env.OPENAI_MODEL || "gpt-5.4-mini",
   maxUploadBytes: Number(process.env.MAX_UPLOAD_MB || 25) * 1024 * 1024,
-  uploadDir: path.resolve(process.env.UPLOAD_DIR || "./storage/uploads"),
-  outputPdfDir: path.resolve(process.env.OUTPUT_PDF_DIR || "./output/pdf"),
+  storageRoot,
+  uploadDir,
+  outputPdfDir,
   dataDir: path.resolve(process.env.DATA_DIR || "./.data/rased")
 };

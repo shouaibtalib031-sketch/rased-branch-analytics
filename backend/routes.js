@@ -26,6 +26,7 @@ const cleanKey=value=>String(value||"").trim().replace(/\s+/g," ").replace(/[أ�
 const branchKey=(name="",city="")=>cleanKey(name).replace(/^فرع\s+/,"").replace(cleanKey(city),"").trim();
 const textOf=value=>String(value??"").trim();
 const safeScore=value=>Math.max(0,Math.min(100,Number(value)||0));
+const optionalScore=value=>value===null||value===undefined||value===""?null:safeScore(value);
 const dueFor=severity=>new Date(Date.now()+({critical:2,high:3,medium:7,low:14}[severity]||7)*86400000).toISOString();
 const severityOf=o=>{
   const raw=textOf(o?.severity).toLowerCase(),body=cleanKey(`${o?.body||""} ${o?.description||""}`);
@@ -64,20 +65,29 @@ function normalizeDraft(input={}){
   })).filter((w,i,a)=>w.warningText&&a.findIndex(x=>cleanKey(x.warningText)===cleanKey(w.warningText))===i);
   return {
     ...input,
-    branchName:textOf(input.branchName||input.branch||input.branch_name)||"فرع غير محدد",
-    city:textOf(input.city)||"غير محددة",
-    region:textOf(input.region)||"غير محددة",
-    visitDate:textOf(input.visitDate||input.date)||new Date().toISOString().slice(0,10),
-    inspectorName:textOf(input.inspectorName||input.monitorName||input.supervisorName||input.inspector)||"مراقب غير محدد",
+    branchName:textOf(input.branchName||input.branch||input.branch_name),
+    city:textOf(input.city),
+    region:textOf(input.region),
+    visitDate:textOf(input.visitDate||input.date),
+    inspectorName:textOf(input.inspectorName||input.monitorName||input.supervisorName||input.inspector),
     reportNumber:textOf(input.reportNumber||input.reportNo),
-    finalScore:safeScore(input.finalScore||input.score||input.final_score),
-    items:(input.items||[]).map(x=>({name:textOf(x.name||x.item||x.category)||"بند تشغيلي",score:safeScore(x.score||x.grade),notes:textOf(x.notes||x.note||x.comment)})).filter(x=>x.name),
+    finalScore:optionalScore(input.finalScore??input.score??input.final_score),
+    items:(input.items||[]).map(x=>({name:textOf(x.name||x.item||x.category)||"بند تشغيلي",score:optionalScore(x.score??x.grade),notes:textOf(x.notes||x.note||x.comment)})).filter(x=>x.name&&x.score!==null),
     observations:[...observations,...imageObservations],
     warnings,
     managementRecommendation:textOf(input.managementRecommendation)||"متابعة تنفيذ الملاحظات حسب درجة الخطورة.",
     branchRecommendation:textOf(input.branchRecommendation)||"معالجة الملاحظات وتوثيق الإغلاق بالصور.",
     urgent:Boolean(input.urgent||observations.some(o=>["high","critical"].includes(o.severity))||safeScore(input.finalScore)<60)
   };
+}
+function validateExtractedReport(d){
+  const errors=[];
+  if(!d.branchName||/^فرع\s*غير\s*محدد$/i.test(d.branchName))errors.push("لم يتم استخراج اسم الفرع من داخل التقرير");
+  if(!d.inspectorName||/^مراقب\s*غير\s*محدد$/i.test(d.inspectorName))errors.push("لم يتم استخراج اسم المراقب من داخل التقرير");
+  if(!d.visitDate||Number.isNaN(Date.parse(d.visitDate)))errors.push("لم يتم استخراج تاريخ زيارة صالح من داخل التقرير");
+  if(d.finalScore===null||Number.isNaN(Number(d.finalScore)))errors.push("لم يتم استخراج التقييم النهائي من داخل التقرير");
+  if(!Array.isArray(d.items)||!d.items.length)errors.push("لم يتم استخراج البنود التشغيلية ودرجاتها");
+  return errors;
 }
 async function ensureBranch(client,d){
   const name=d.branchName,city=d.city,regionName=d.region;
@@ -235,10 +245,13 @@ api.post("/reports/upload",allow("system_admin","operations_manager","supervisor
 api.post("/reports/:id/analyze",allow("system_admin","operations_manager","supervisor"),async(req,res)=>{
  const report=await one("select * from reports where id=$1",[req.params.id]);if(!report)return res.status(404).json({error:"التقرير غير موجود"});
  try{
+   if(!report.storage_path||!fs.existsSync(report.storage_path))throw new Error("الملف الأصلي غير موجود في التخزين الدائم. لا يمكن إعادة التحليل دون الملف الأصلي.");
    await db.query("update reports set status='analyzing',analysis_status='analyzing',analysis_error=null,analysis_started_at=now() where id=$1",[report.id]);
    reportLog("TEXT_EXTRACTION_STARTED",{reportId:report.id,filename:reportName(report)});
    reportLog("ANALYSIS_STARTED",{reportId:report.id});
    const result=normalizeDraft(await analyzeFile({path:report.storage_path,originalname:reportName(report),mimetype:report.mime_type}));
+   const extractionErrors=validateExtractedReport(result);
+   if(extractionErrors.length)throw new Error(`فشل الاستخراج: ${extractionErrors.join("، ")}`);
    reportLog("ANALYSIS_COMPLETED",{reportId:report.id,items:result.items.length,observations:result.observations.length,warnings:result.warnings.length});
    const inspector=await ensureSupervisor(result.inspectorName);
    const saved=await transaction(async client=>{
@@ -278,6 +291,7 @@ api.post("/reports/:id/approve",allow("system_admin","operations_manager"),async
  if(existing?.workflow_state==="approved")return res.json({ok:true,branchId:existing.branch_id,alreadyApproved:true});
  const v=await one("select * from visits where id=$1 and workflow_state='review'",[req.params.id]);if(!v)return res.status(404).json({error:"المسودة غير موجودة أو معتمدة"});
  const d=normalizeDraft(v.draft_data||{});
+ const extractionErrors=validateExtractedReport(d);if(extractionErrors.length)return res.status(400).json({error:`فشل الاستخراج: ${extractionErrors.join("، ")}`});
  const inspector=await ensureSupervisor(d.inspectorName);
  const result=await transaction(async client=>{
    const branch=await ensureBranch(client,d);
@@ -316,6 +330,13 @@ api.patch("/notifications/:id/read",async(req,res)=>{await db.query("update noti
 api.patch("/notifications/read-all",async(req,res)=>{await db.query("update notifications set read_at=now() where user_id=$1 and read_at is null",[req.user.sub]);res.json({ok:true})});
 api.get("/settings",allow("system_admin","operations_manager"),async(_req,res)=>res.json({items:await q("select * from operational_items order by sort_order"),regions:await q("select * from regions order by name"),users:await q("select u.id,u.full_name,u.email,u.active,r.name role,r.name_ar role_ar from users u join roles r on r.id=u.role_id"),roles:await q("select * from roles")}));
 api.post("/settings/reset-production",allow("system_admin"),async(req,res)=>{if(req.body.confirmation!=="مسح بيانات التجربة")return res.status(400).json({error:"عبارة التأكيد غير صحيحة"});const deleted=await resetOperationalData({simulateFailure:config.nodeEnv==="test"&&req.body.simulateFailure===true});await audit(req,"system.production_reset","system","operational_data",deleted,{productionReady:true});res.json({ok:true,deleted,message:"تم مسح بيانات التجربة بالكامل. المنصة الآن فارغة وجاهزة لبدء التشغيل الفعلي من التقارير الحقيقية."})});
+api.post("/settings/reset-reports",allow("system_admin"),async(req,res)=>{
+ if(req.body.confirmation!=="مسح جميع بيانات التقارير والبدء من جديد")return res.status(400).json({error:"عبارة التأكيد الأولى غير صحيحة"});
+ if(req.body.secondConfirmation!=="أفهم أنه لا يمكن التراجع")return res.status(400).json({error:"عبارة التأكيد الثانية غير صحيحة"});
+ const deleted=await resetOperationalData({simulateFailure:config.nodeEnv==="test"&&req.body.simulateFailure===true});
+ await audit(req,"system.reports_reset","system","reporting_data",deleted,{usersAndSettingsPreserved:true});
+ res.json({ok:true,deleted,message:"تم مسح جميع بيانات التقارير والزيارات والفروع المرتبطة بها. بقي المستخدمون والصلاحيات والإعدادات والبنود التشغيلية كما هي."});
+});
 api.post("/settings/items",allow("system_admin"),async(req,res)=>{const x={id:id(),...req.body};await db.query("insert into operational_items(id,name,weight,safety_critical,sort_order) values($1,$2,$3,$4,$5)",[x.id,x.name,x.weight||1,!!x.safetyCritical,x.sortOrder||0]);res.status(201).json(x)});
 api.patch("/settings/items/:id",allow("system_admin"),async(req,res)=>{const before=await one("select * from operational_items where id=$1",[req.params.id]);if(!before)return res.status(404).json({error:"البند غير موجود"});await db.query("update operational_items set name=coalesce($2,name),weight=coalesce($3,weight),safety_critical=coalesce($4,safety_critical),active=coalesce($5,active) where id=$1",[req.params.id,req.body.name||null,req.body.weight??null,typeof req.body.safetyCritical==="boolean"?req.body.safetyCritical:null,typeof req.body.active==="boolean"?req.body.active:null]);await audit(req,"item.update","operational_item",req.params.id,before,req.body);res.json({ok:true})});
 api.delete("/settings/items/:id",allow("system_admin"),async(req,res)=>{const before=await one("select * from operational_items where id=$1",[req.params.id]);if(!before)return res.status(404).json({error:"البند غير موجود"});await db.query("update operational_items set active=false where id=$1",[req.params.id]);await audit(req,"item.archive","operational_item",req.params.id,before,{active:false});res.json({ok:true,archived:true})});

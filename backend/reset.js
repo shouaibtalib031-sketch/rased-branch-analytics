@@ -12,7 +12,7 @@ async function existingFiles(directory){
 
 export async function resetOperationalData({simulateFailure=false}={}){
   const files=[...await existingFiles(config.uploadDir),...await existingFiles(config.outputPdfDir)];
-  const quarantine=path.resolve("./storage",`.reset-${randomUUID()}`),moved=[];
+  const quarantine=path.join(config.storageRoot,`.reset-${randomUUID()}`),moved=[];
   await fs.mkdir(quarantine,{recursive:true});
   let counts;
   try{

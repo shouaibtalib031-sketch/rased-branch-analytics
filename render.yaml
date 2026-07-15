@@ -32,6 +32,8 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: gpt-5.4-mini
+      - key: RASED_STORAGE_DIR
+        value: /var/lib/rased
       - key: UPLOAD_DIR
         value: /var/lib/rased/uploads
       - key: OUTPUT_PDF_DIR

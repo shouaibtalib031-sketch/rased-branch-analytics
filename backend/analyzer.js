@@ -39,13 +39,13 @@ export async function analyzeFile(file){
 function clean(value=""){return String(value).replace(/\s+/g," ").trim()}
 function categoryOf(text=""){
   const t=text.replace(/[أإآ]/g,"ا").replace(/ة/g,"ه").toLowerCase();
-  const map=[["نظافة","نظاف"],["سلامة","سلامه امن حريق خطر"],["تخزين","تخزين مستودع"],["منتج","منتج منتجات جوده تالف"],["تخمير","تخمير"],["معدات","معدات ادوات قلايه فرن"],["أفراد","موظف عامل فريق افراد"],["خدمة","خدمه ضيافه كاشير"],["هوية بصرية","هويه بصر"],["الخبيز","خبيز خبز"],["التجهيز","تجهيز"]];
+  const map=[["نظافة","نظاف clean cleanliness hygiene"],["سلامة","سلامه امن حريق خطر safety risk hazard fire"],["تخزين","تخزين مستودع storage warehouse"],["منتج","منتج منتجات جوده تالف product products quality damaged"],["تخمير","تخمير fermentation"],["معدات","معدات ادوات قلايه فرن equipment fryer oven maintenance"],["أفراد","موظف عامل فريق افراد staff employee team"],["خدمة","خدمه ضيافه كاشير service cashier hospitality"],["هوية بصرية","هويه بصر identity branding"],["الخبيز","خبيز خبز baking bakery"],["التجهيز","تجهيز preparation"]];
   return map.find(([,words])=>words.split(" ").some(w=>t.includes(w)))?.[0]||"تشغيل عام";
 }
 function severityOf(text=""){
   const t=text.replace(/[أإآ]/g,"ا").replace(/ة/g,"ه").toLowerCase();
-  if(/خطر|حرج|سلامه|تالف|منتهي|حريق|اصابه/.test(t))return "critical";
-  if(/عاجل|ضعيف|مخالف|متاخر|صيانة|صيانه/.test(t))return "high";
+  if(/خطر|حرج|سلامه|تالف|منتهي|حريق|اصابه|critical|hazard|expired|damaged/.test(t))return "critical";
+  if(/عاجل|ضعيف|مخالف|متاخر|صيانة|صيانه|high|maintenance|required|must/.test(t))return "high";
   if(/بسيط|طفيف/.test(t))return "low";
   return "medium";
 }
@@ -56,19 +56,19 @@ function firstMatch(text,patterns,fallback=""){
 function deterministicExtraction(name,text=""){
   const lines=text.split(/\r?\n/).map(clean).filter(Boolean),joined=lines.join("\n");
   const warningLines=lines.filter(x=>/انذار|إنذار|warning/i.test(x)).slice(0,30);
-  const observationLines=lines.filter(x=>!/انذار|إنذار|warning/i.test(x)&&/(ملاحظة|ملاحظات|يجب|يرجى|غير|ضعيف|تالف|منتهي|صيانة|صيانه|نظافة|تخزين|سلامة|منتج|معدات|تخمير|خبز|خدمة)/i.test(x)&&x.length>12).slice(0,80);
+  const observationLines=lines.filter(x=>!/انذار|إنذار|warning/i.test(x)&&/(ملاحظة|ملاحظات|يجب|يرجى|غير|ضعيف|تالف|منتهي|صيانة|صيانه|نظافة|تخزين|سلامة|منتج|معدات|تخمير|خبز|خدمة|observation|must|required|maintenance|clean|storage|safety|product|equipment|service|quality)/i.test(x)&&x.length>12).slice(0,80);
   const percentMatches=[...joined.matchAll(/(?:التقييم|النسبة|الدرجة|score)?\s*[:：]?\s*(\d{1,3}(?:[.,]\d{1,2})?)\s*%/gi)].map(x=>Number(x[1].replace(",","."))).filter(x=>x<=100);
-  const date=firstMatch(joined,[/(\d{4}-\d{2}-\d{2})/,/(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|June|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/i],new Date().toISOString().slice(0,10));
-  const parsedDate=Number.isNaN(Date.parse(date))?date:new Date(date).toISOString().slice(0,10);
-  const branchName=firstMatch(joined,[/(?:اسم\s*)?الفرع\s*[:：-]\s*([^\n]+)/,/فرع\s+([^\n|،]+)/],name.replace(/\.[^.]+$/,""));
-  const inspectorName=firstMatch(joined,[/المراقب\s*[:：-]\s*([^\n]+)/,/اسم\s+المراقب\s*[:：-]\s*([^\n]+)/],"مراقب غير محدد");
-  const city=firstMatch(joined,[/المدينة\s*[:：-]\s*([^\n]+)/,/مدينة\s*[:：-]\s*([^\n]+)/],"غير محددة");
-  const region=firstMatch(joined,[/المنطقة\s*[:：-]\s*([^\n]+)/],"غير محددة");
+  const date=firstMatch(joined,[/تاريخ\s*(?:الزيارة|التقرير)?\s*[:：-]\s*([^\n]+)/,/visit\s*date\s*[:：-]\s*([^\n]+)/i,/date\s*[:：-]\s*([^\n]+)/i,/(\d{4}-\d{2}-\d{2})/,/(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|June|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/i],"");
+  const parsedDate=date&&!Number.isNaN(Date.parse(date))?new Date(date).toISOString().slice(0,10):date;
+  const branchName=firstMatch(joined,[/(?:اسم\s*)?الفرع\s*[:：-]\s*([^\n]+)/,/branch\s*[:：-]\s*([^\n]+)/i], "");
+  const inspectorName=firstMatch(joined,[/المراقب\s*[:：-]\s*([^\n]+)/,/اسم\s+المراقب\s*[:：-]\s*([^\n]+)/,/inspector\s*[:：-]\s*([^\n]+)/i,/auditor\s*[:：-]\s*([^\n]+)/i],"");
+  const city=firstMatch(joined,[/المدينة\s*[:：-]\s*([^\n]+)/,/مدينة\s*[:：-]\s*([^\n]+)/,/city\s*[:：-]\s*([^\n]+)/i],"");
+  const region=firstMatch(joined,[/المنطقة\s*[:：-]\s*([^\n]+)/,/region\s*[:：-]\s*([^\n]+)/i],"");
   const reportNumber=firstMatch(joined,[/رقم\s+التقرير\s*[:：-]\s*([^\n]+)/,/Report\s*No\.?\s*[:：-]\s*([^\n]+)/i],"");
   const observations=observationLines.map(line=>({body:line,category:categoryOf(line),severity:severityOf(line),recommendation:"معالجة الملاحظة وتوثيق الإجراء التصحيحي"}));
   const warnings=warningLines.map(line=>({reason:line.replace(/^(?:ال)?انذار\s*/i,""),itemName:categoryOf(line),questionNumber:firstMatch(line,[/سؤال\s*رقم\s*[:：-]?\s*(\d+)/,/Q(?:uestion)?\s*[:：-]?\s*(\d+)/i],""),warningText:line}));
   const itemNames=["الهوية البصرية","النظافة العامة","الأفراد","المنتجات","المعدات والأدوات","الأمن والسلامة","التخزين","التخمير","التجهيز","الخبيز","المنتج النهائي","الخدمة والضيافة"];
-  const finalScore=percentMatches[0]??0;
+  const finalScore=percentMatches[0]??null;
   const items=itemNames.map(item=>({name:item,score:percentMatches.find((_,i)=>i>0)??finalScore,notes:observationLines.find(x=>categoryOf(x)===categoryOf(item))||""})).filter((_,i)=>i<Math.max(2,Math.min(12,percentMatches.length||itemNames.length)));
-  return {branchName,city,region,visitDate:parsedDate,inspectorName,reportNumber,finalScore,items,observations,warnings,imageFindings:[],summary:`تم استخراج بيانات التقرير ${name} بقواعد تحليل نصية احتياطية.`,managementRecommendation:observations.some(o=>["high","critical"].includes(o.severity))||warnings.length?"مراجعة الملاحظات والإنذارات وتحديد خطة متابعة حسب الأولوية.":"اعتماد المتابعة الدورية مع تثبيت نقاط القوة.",branchRecommendation:"إغلاق الملاحظات بالصور وتوثيق الإجراءات التصحيحية.",urgent:finalScore<60||observations.some(o=>o.severity==="critical")};
+  return {branchName,city,region,visitDate:parsedDate,inspectorName,reportNumber,finalScore,items,observations,warnings,imageFindings:[],summary:`تم استخراج بيانات التقرير ${name} من محتوى الملف فقط.`,managementRecommendation:observations.some(o=>["high","critical"].includes(o.severity))||warnings.length?"مراجعة الملاحظات والإنذارات وتحديد خطة متابعة حسب الأولوية.":"اعتماد المتابعة الدورية مع تثبيت نقاط القوة.",branchRecommendation:"إغلاق الملاحظات بالصور وتوثيق الإجراءات التصحيحية.",urgent:Number(finalScore)<60||observations.some(o=>o.severity==="critical")};
 }
