@@ -223,7 +223,7 @@ api.get("/reports",async(req,res)=>{
   r.analysis_error,r.branch_id,r.visit_id,r.supervisor_id,
   coalesce(r.uploaded_at,r.created_at) uploaded_at,r.analysis_started_at,r.analysis_completed_at,
   b.name branch,b.city,u.full_name supervisor,v.visit_date,v.final_score,
-  case coalesce(r.analysis_status,r.status,'uploaded') when 'completed' then 100 when 'analyzing' then 50 when 'failed' then 100 else 0 end progress
+  case coalesce(r.analysis_status,r.status,'uploaded') when 'completed' then 100 when 'analyzing' then 50 when 'review' then 75 when 'failed' then 100 else 0 end progress
   from reports r
   left join branches b on b.id=r.branch_id
   left join visits v on v.id=r.visit_id
@@ -257,7 +257,15 @@ api.post("/reports/:id/analyze",allow("system_admin","operations_manager","super
    reportLog("ANALYSIS_STARTED",{reportId:report.id});
    const result=normalizeDraft(await analyzeFile({path:report.storage_path,originalname:reportName(report),mimetype:report.mime_type}));
    const extractionErrors=validateExtractedReport(result);
-   if(extractionErrors.length)throw new Error(`فشل الاستخراج: ${extractionErrors.join("، ")}`);
+   if(extractionErrors.length){
+     const visitId=report.visit_id||id();
+     await db.query(`insert into visits(id,report_id,branch_id,supervisor_id,visit_date,final_score,status,workflow_state,extraction_confidence,draft_data,approved_by,approved_at)
+       values($1,$2,null,null,$3,$4,$5,'review',60,$6,null,null)
+       on conflict(id) do update set branch_id=null,supervisor_id=null,visit_date=excluded.visit_date,final_score=excluded.final_score,status=excluded.status,workflow_state='review',extraction_confidence=60,draft_data=excluded.draft_data,approved_by=null,approved_at=null`,[visitId,report.id,result.visitDate||null,result.finalScore,statusOf(result.finalScore),JSON.stringify(result)]);
+     await db.query("update reports set status='review',analysis_status='review',analysis_error=$2,visit_id=$3,analysis_completed_at=now() where id=$1",[report.id,`تحتاج مراجعة يدوية: ${extractionErrors.join("، ")}`,visitId]);
+     reportLog("REPORT_NEEDS_MANUAL_REVIEW",{reportId:report.id,visitId,missing:extractionErrors});
+     return res.json({needsReview:true,visitId,reportId:report.id,confidence:60,data:result,missingFields:extractionErrors,message:"تحتاج بعض الحقول الأساسية إلى مراجعة يدوية قبل الاعتماد."});
+   }
    reportLog("ANALYSIS_COMPLETED",{reportId:report.id,items:result.items.length,observations:result.observations.length,warnings:result.warnings.length});
    const inspector=await ensureSupervisor(result.inspectorName);
    const saved=await transaction(async client=>{
