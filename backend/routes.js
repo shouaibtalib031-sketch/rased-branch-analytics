@@ -43,6 +43,12 @@ const categoryOf=(body="",fallback="تشغيل عام")=>{
 };
 const reportLog=(event,meta={})=>console.log(event,JSON.stringify(Object.fromEntries(Object.entries(meta).filter(([,v])=>v!==undefined&&v!==null))));
 const reportName=r=>r.original_filename||r.original_name||r.name||"report";
+function safeReportFilePath(report){
+  if(!report?.storage_path)return null;
+  const absolute=path.resolve(report.storage_path);
+  const allowedRoots=[config.uploadDir,config.storageRoot].map(x=>path.resolve(x));
+  return allowedRoots.some(root=>absolute===root||absolute.startsWith(`${root}${path.sep}`))?absolute:null;
+}
 function normalizeDraft(input={}){
   const observations=[...(input.observations||[]),...(input.notes||[]),...(input.findings||[])].map(o=>({
     body:textOf(o.body||o.note||o.description||o.text),
@@ -307,11 +313,34 @@ api.post("/reports/:id/approve",allow("system_admin","operations_manager"),async
 });
 api.delete("/reports/:id",allow("system_admin"),async(req,res)=>{
  const report=await one("select * from reports where id=$1",[req.params.id]);if(!report)return res.status(404).json({error:"التقرير غير موجود"});
+ const filePath=safeReportFilePath(report);
+ if(filePath&&fs.existsSync(filePath))await fs.promises.unlink(filePath);
  await transaction(async client=>{
+   const visits=await rows(client,"select distinct id,branch_id,supervisor_id from visits where report_id=$1 or id=$2",[report.id,report.visit_id||""]);
+   const branchIds=[...new Set([report.branch_id,...visits.map(v=>v.branch_id)].filter(Boolean))];
+   const supervisorIds=[...new Set([report.supervisor_id,...visits.map(v=>v.supervisor_id)].filter(Boolean))];
+   const visitIds=visits.map(v=>v.id);
    await client.query("update reports set visit_id=null,branch_id=null,supervisor_id=null where id=$1",[report.id]);
-   await client.query("update visits set report_id=null where report_id=$1",[report.id]);
-   await client.query("delete from visits where report_id=$1 or id=$2",[report.id,report.visit_id||""]);
+   for(const visitId of visitIds){
+     await client.query("delete from observation_images where observation_id in (select id from observations where report_id=$1 or visit_id=$2)",[report.id,visitId]);
+     await client.query("delete from observation_workflow where observation_id in (select id from observations where report_id=$1 or visit_id=$2)",[report.id,visitId]);
+     await client.query("delete from timeline_events where visit_id=$1 or observation_id in (select id from observations where report_id=$2 or visit_id=$1)",[visitId,report.id]);
+     await client.query("delete from recommendations where visit_id=$1",[visitId]);
+     await client.query("delete from ai_analysis where visit_id=$1",[visitId]);
+     await client.query("delete from branch_warnings where report_id=$1 or visit_id=$2",[report.id,visitId]);
+     await client.query("delete from interventions where report_id=$1 or visit_id=$2 or observation_id in (select id from observations where report_id=$1 or visit_id=$2)",[report.id,visitId]);
+     await client.query("delete from observations where report_id=$1 or visit_id=$2",[report.id,visitId]);
+     await client.query("delete from visit_items where visit_id=$1",[visitId]);
+     await client.query("delete from visits where id=$1",[visitId]);
+   }
+   if(!visitIds.length){
+     await client.query("delete from branch_warnings where report_id=$1",[report.id]);
+     await client.query("delete from interventions where report_id=$1",[report.id]);
+     await client.query("delete from observations where report_id=$1",[report.id]);
+   }
    await client.query("delete from reports where id=$1",[report.id]);
+   for(const branchId of branchIds)await client.query("delete from branches b where b.id=$1 and not exists(select 1 from visits v where v.branch_id=b.id) and not exists(select 1 from reports r where r.branch_id=b.id)",[branchId]);
+   for(const supervisorId of supervisorIds)await client.query("delete from supervisors s where s.id=$1 and not exists(select 1 from visits v where v.supervisor_id=s.id) and not exists(select 1 from reports r where r.supervisor_id=s.id)",[supervisorId]);
  });
  await audit(req,"report.delete","report",report.id,report,null);clearCache();res.json({ok:true});
 });
